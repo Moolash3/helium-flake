@@ -24,7 +24,7 @@
 
         versions = {
           linux = "0.19.4.1";
-          darwin = "0.19.3.1";
+          darwin = "0.19.4.1";
         };
 
         version = if pkgs.stdenv.hostPlatform.isDarwin then versions.darwin else versions.linux;
@@ -40,11 +40,11 @@
           };
           x86_64-darwin = {
             url = "https://github.com/imputnet/helium-macos/releases/download/${versions.darwin}/helium_${versions.darwin}_x86_64-macos.dmg";
-            hash = "sha256-BQhen6QgZdNusoEPzyjq/iI7anVZku4+iUflFH/q1r4=";
+            hash = "sha256-ekmZ6zfoeSBZpLiqJv/8eWLIiy8xo07i4x/24hEm510=";
           };
           aarch64-darwin = {
             url = "https://github.com/imputnet/helium-macos/releases/download/${versions.darwin}/helium_${versions.darwin}_arm64-macos.dmg";
-            hash = "sha256-ugwwxIPubEbkj/wjmuaysIR6/etU60puoxZlBUpS0Vk=";
+            hash = "sha256-Ew5DEAjyXe2dUiEL36hmsKzlnQTNqv8Hx3kx+9f5MyE=";
           };
         };
 
