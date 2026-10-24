@@ -5,16 +5,23 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: update-helium-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      changed: ${{ steps.git-check.outputs.changed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.1
         with:
-          token: ${{ secrets.GH_PAT }}
+          persist-credentials: false
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31.9.0
@@ -31,8 +38,8 @@ jobs:
 
           # 1. Linux Update Check
           echo "Checking for Linux updates..."
-          LATEST_LINUX_VERSION=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/imputnet/helium-linux/releases/latest | jq -r .tag_name)
+          LATEST_LINUX_VERSION=$(curl --fail --silent --show-error -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/imputnet/helium-linux/releases/latest | jq -er '.tag_name | select(type == "string" and length > 0)')
           CURRENT_LINUX_VERSION=$(nix eval --raw .#packages.x86_64-linux.helium.version)
 
           if [ "$LATEST_LINUX_VERSION" != "$CURRENT_LINUX_VERSION" ]; then
@@ -43,8 +50,8 @@ jobs:
             ARM_URL="https://github.com/imputnet/helium-linux/releases/download/${LATEST_LINUX_VERSION}/helium-${LATEST_LINUX_VERSION}-arm64_linux.tar.xz"
             
             echo "Fetching Linux hashes..."
-            X86_HASH=$(nix hash convert --to sri --hash-algo sha256 $(nix-prefetch-url "$X86_URL"))
-            ARM_HASH=$(nix hash convert --to sri --hash-algo sha256 $(nix-prefetch-url "$ARM_URL"))
+            X86_HASH=$(nix hash convert --to sri --hash-algo sha256 "$(nix-prefetch-url "$X86_URL")")
+            ARM_HASH=$(nix hash convert --to sri --hash-algo sha256 "$(nix-prefetch-url "$ARM_URL")")
             
             sed -i "/x86_64-linux = {/,/hash =/ s|hash = \"[^\"]*\"|hash = \"$X86_HASH\"|" flake.nix
             sed -i "/aarch64-linux = {/,/hash =/ s|hash = \"[^\"]*\"|hash = \"$ARM_HASH\"|" flake.nix
@@ -55,8 +62,8 @@ jobs:
 
           # 2. macOS Update Check
           echo "Checking for macOS updates..."
-          LATEST_DARWIN_VERSION=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/imputnet/helium-macos/releases/latest | jq -r .tag_name)
+          LATEST_DARWIN_VERSION=$(curl --fail --silent --show-error -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/imputnet/helium-macos/releases/latest | jq -er '.tag_name | select(type == "string" and length > 0)')
           CURRENT_DARWIN_VERSION=$(nix eval --raw .#packages.x86_64-darwin.helium.version)
 
           if [ "$LATEST_DARWIN_VERSION" != "$CURRENT_DARWIN_VERSION" ]; then
@@ -67,8 +74,8 @@ jobs:
             ARM_DARWIN_URL="https://github.com/imputnet/helium-macos/releases/download/${LATEST_DARWIN_VERSION}/helium_${LATEST_DARWIN_VERSION}_arm64-macos.dmg"
             
             echo "Fetching macOS hashes..."
-            X86_DARWIN_HASH=$(nix hash convert --to sri --hash-algo sha256 $(nix-prefetch-url "$X86_DARWIN_URL"))
-            ARM_DARWIN_HASH=$(nix hash convert --to sri --hash-algo sha256 $(nix-prefetch-url "$ARM_DARWIN_URL"))
+            X86_DARWIN_HASH=$(nix hash convert --to sri --hash-algo sha256 "$(nix-prefetch-url "$X86_DARWIN_URL")")
+            ARM_DARWIN_HASH=$(nix hash convert --to sri --hash-algo sha256 "$(nix-prefetch-url "$ARM_DARWIN_URL")")
             
             sed -i "/x86_64-darwin = {/,/hash =/ s|hash = \"[^\"]*\"|hash = \"$X86_DARWIN_HASH\"|" flake.nix
             sed -i "/aarch64-darwin = {/,/hash =/ s|hash = \"[^\"]*\"|hash = \"$ARM_DARWIN_HASH\"|" flake.nix
@@ -77,33 +84,81 @@ jobs:
             echo "macOS is already at the latest version: $LATEST_DARWIN_VERSION"
           fi
 
-          echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
+          echo "update_needed=$UPDATE_NEEDED" >> "$GITHUB_OUTPUT"
 
       - name: Update flake inputs
         if: steps.update-check.outputs.update_needed == 'true'
         run: nix flake update
-
-      - name: Verify flake
-        if: steps.update-check.outputs.update_needed == 'true'
-        run: nix flake check --all-systems
 
       - name: Check for changes
         if: steps.update-check.outputs.update_needed == 'true'
         id: git-check
         run: |
           if [ -n "$(git status --porcelain)" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Upload candidate update
+        if: steps.git-check.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: helium-update
+          path: |
+            flake.nix
+            flake.lock
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    needs: update
+    if: needs.update.outputs.changed == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      source-artifact: helium-update
+
+  commit:
+    needs: [update, build]
+    if: needs.update.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Create updater token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Checkout tested base revision
+        uses: actions/checkout@v6.0.1
+        with:
+          ref: ${{ github.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Download tested update
+        uses: actions/download-artifact@v5
+        with:
+          name: helium-update
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31.9.0
+
       - name: Commit and push changes
-        if: steps.update-check.outputs.update_needed == 'true' && steps.git-check.outputs.changed == 'true'
+        env:
+          TARGET_REF: ${{ github.ref }}
+          BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          BOT_ID=$(gh api "users/$BOT_LOGIN" --jq .id)
+          git config user.name "$BOT_LOGIN"
+          git config user.email "$BOT_ID+$BOT_LOGIN@users.noreply.github.com"
           git add flake.nix flake.lock
           LINUX_V=$(nix eval --raw .#packages.x86_64-linux.helium.version)
           DARWIN_V=$(nix eval --raw .#packages.x86_64-darwin.helium.version)
           git commit -m "chore: update helium (linux: $LINUX_V, macos: $DARWIN_V) and update flake.lock"
-          git push
+          # Reject a concurrent branch change rather than publishing an untested merge.
+          git push origin "HEAD:$TARGET_REF"

@@ -1,0 +1,59 @@
+name: Build Helium
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source-artifact:
+        description: Artifact containing the candidate flake.nix and flake.lock
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+          - system: x86_64-darwin
+            runner: macos-15-intel
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download candidate update
+        if: inputs.source-artifact != ''
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.source-artifact }}
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31.9.0
+
+      - name: Verify flake
+        run: nix flake check --no-update-lock-file
+
+      - name: Build package
+        env:
+          NIX_SYSTEM: ${{ matrix.system }}
+        run: nix build --no-update-lock-file --print-build-logs ".#packages.${NIX_SYSTEM}.helium"
+
+      - name: Check installed executable
+        run: test -x result/bin/helium
